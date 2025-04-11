@@ -1,0 +1,107 @@
+// - Wolfgang Roenninger <wroennin@ethz.ch>		      |	// - Lorenzo Leone <lleone@ethz.ch>
+// - Florian Zaruba <zarubaf@iis.ee.ethz.ch>		      |	// Based on:
+// - Andreas Kurth <akurth@iis.ee.ethz.ch>		      |	// - tb_axi_xbar.sv
+							      >
+module tb_axi_xbar #(					      |	module tb_axi_reduction_xbar #(
+							      >	  /// Number of ports allowed to sned reduction requests
+							      >	  parameter int unsigned TbNumRedPorts       = 32'd0,
+  parameter int unsigned TbNumWrites         = 32'd200,	      |	  parameter int unsigned TbNumWrites         = 32'd300,
+  parameter int unsigned TbNumReads          = 32'd200,	      |	  parameter int unsigned TbNumReads          = 32'd0, 
+  localparam int unsigned TbAxiIdWidthSlaves =  TbAxiIdWidthM |	  localparam int unsigned TbAxiIdWidthSlaves   =  TbAxiIdWidt
+  localparam int unsigned TbAxiAddrWidth     =  32'd32;	      |	  localparam int unsigned TbAxiAddrWidth       =  32'd32;
+  localparam int unsigned TbAxiStrbWidth     =  TbAxiDataWidt |	  localparam int unsigned TbAxiStrbWidth       =  TbAxiDataWi
+  localparam int unsigned TbAxiUserWidth     =  5;	      |
+							      >	  // Parameters for the reduction feature
+							      >	  localparam int unsigned TbAxiRedOpcodeWidth  =  2;
+							      >	  localparam int unsigned TbAxiUserWidth       =  TbAxiAddrWi
+							      >	  localparam int unsigned TbNumNormalPorts     =  TbNumSlaves
+							      >	  localparam int unsigned RedRulesSlice        =  2*TbNumRedP
+							      >	  localparam int unsigned NormalRulesSlice     =  RedRulesSli
+							      >	  localparam bit          ENABLE_REDUCTION     =  (TbNumRedPo
+							      >	  localparam bit          ENABLE_REDID         =  1'b0;
+							      >	  localparam int          TbReductionId        =  (ENABLE_RED
+							      >
+    LatencyMode:        axi_pkg::CUT_ALL_AX,		      |	    //LatencyMode:        axi_pkg::CUT_ALL_PORTS,
+							      >	    LatencyMode:        axi_pkg::NO_LATENCY,
+    NoAddrRules:        TbNumSlaves			      |	    //NoAddrRules:        TbNumAddrRules,
+							      >	    NoAddrRules:        2*TbNumSlaves,
+							      >	    NoRedPorts:         TbNumRedPorts,
+							      >	    EnableRedId:        ENABLE_REDID
+							      >	  // --------------------------------------------------------
+							      >	  // |                                ADDRESS MAP GENERATION 
+							      >	  // --------------------------------------------------------
+  localparam rule_t [xbar_cfg.NoAddrRules-1:0] AddrMap = addr |	  // for reduction capability, both offset and base must be a
+							      >	  //
+							      >	  // Use the following Address Map if you have TbNumRedPorts 
+							      >	  localparam rule_t [xbar_cfg.NoAddrRules-1:0] AddrMap = {add
+							      >	                                                          add
+							      >	                                                          add
+							      >	                                                          add
+							      >	                                                         };
+							      >	  //
+							      >	  // Use the following Address Map if you have TbNumRedPorts 
+							      >	  // localparam rule_t [xbar_cfg.NoAddrRules-1:0] AddrMap = {
+							      >	  //                                                         
+							      >	  //                                                        }
+							      >	  
+							      >	  function rule_t [xbar_cfg.NoRedPorts-1:0] addr_map_gen_redu
+							      >	    for (int unsigned i = 0; i < xbar_cfg.NoRedPorts; i++) be
+							      >	      addr_map_gen_reduction[i] = rule_t'{
+							      >	        idx:        unsigned'(i),
+							      >	        start_addr: base + offset * i,
+							      >	        end_addr:   base + offset * (i + 1),
+							      >	        default:    '0
+							      >	      };
+							      >	    end
+							      >	  endfunction
+  function rule_t [xbar_cfg.NoAddrRules-1:0] addr_map_gen (); |	  function rule_t [TbNumNormalPorts-1:0] addr_map_gen (addr_t
+    for (int unsigned i = 0; i < xbar_cfg.NoAddrRules; i++) b |	  //function rule_t [xbar_cfg.NoAddrRules-1:0] addr_map_gen (
+							      >	    int idx;
+							      >	    idx = xbar_cfg.NoRedPorts;
+							      >	    for (int unsigned i = 0; i < TbNumNormalPorts; i++) begin
+        idx:        unsigned'(i),			      |	        idx:        unsigned'(idx),
+        start_addr:  i    * 32'h0000_2000,		      |	        start_addr: base + offset * i,
+        end_addr:   (i+1) * 32'h0000_2000,		      |	        end_addr:   base + offset * (i + 1),
+							      >	      idx++;
+  typedef axi_test::axi_rand_master #(			      |	  typedef axi_reduction_test::axi_reduction_rand_master #(
+							      >	  //typedef axi_reduction_test::axi_rand_master #(
+    .MAX_READ_TXNS  ( 20          ),			      |	    .MAX_READ_TXNS    ( 20          ),
+    .MAX_WRITE_TXNS ( 20          ),			      |	    .MAX_WRITE_TXNS   ( 20          ),
+    .AXI_EXCLS      ( TbEnExcl    ),			      |	    .AXI_EXCLS        ( TbEnExcl    ),
+    .AXI_ATOPS      ( TbEnAtop    ),			      |	    .AXI_ATOPS        ( TbEnAtop    ),
+    .UNIQUE_IDS     ( TbUniqueIds )			      |	    .UNIQUE_IDS       ( TbUniqueIds ),
+  ) axi_rand_master_t;					      |	    // Extra parameters to handle reduction requests
+							      >	    .rule_t           ( rule_t               ), 
+							      >	    .NoAddrRules      ( xbar_cfg.NoAddrRules ),
+							      >	    .NoMsts           ( xbar_cfg.NoSlvPorts  ),
+							      >	    .NoSlvs           ( xbar_cfg.NoMstPorts  ),
+							      >	    .NoRedPorts       ( xbar_cfg.NoRedPorts  ),
+							      >	    .NoWrites         ( TbNumWrites          ),
+							      >	    .ENABLE_REDUCTION ( ENABLE_REDUCTION     ),
+							      >	    .ReductionId      ( TbReductionId        ),
+							      >	    .AddrMap          ( AddrMap              )  // TODO: dele
+							      >	  ) axi_reduction_rand_master_t;
+							      >	  //typedef axi_reduction_test::axi_rand_slave #(
+  axi_rand_master_t axi_rand_master [TbNumMasters];	      |	  axi_reduction_rand_master_t axi_rand_master [TbNumMasters];
+							      >
+							      >	                                      AddrMap[xbar_cfg.NoRedP
+							      >	                                      axi_pkg::DEVICE_NONBUFF
+							      >	      axi_rand_master[i].add_memory_region(AddrMap[xbar_cfg.N
+							      >	                                      AddrMap[RedRulesSlice-1
+							      >	                                      axi_pkg::DEVICE_NONBUFF
+							      >	      if (TbNumNormalPorts != 0) begin
+							      >	        axi_rand_master[i].add_memory_region(AddrMap[RedRules
+							      >	                                      AddrMap[NormalRulesSlic
+							      >	                                      axi_pkg::DEVICE_NONBUFF
+							      >	        axi_rand_master[i].add_memory_region(AddrMap[NormalRu
+							      >	      end
+							      >	      
+							      >	      axi_rand_master[i].set_mst_idx(i);
+							      >	      axi_rand_master[i].set_reduction_probability(50);
+							      |	  
+    static tb_axi_xbar_pkg::axi_xbar_monitor #(		      |	    static tb_axi_reduction_xbar_pkg::axi_reduction_xbar_moni
+							      >	      .OpcodeWidth       ( TbAxiRedOpcodeWidth  ),
+							      >	      .NoRedPorts        ( xbar_cfg.NoRedPorts  ),
+							      >	      .data_t            ( data_t               ),
+  axi_xbar_intf #(					      |	  axi_reduction_xbar_intf #(
+							      >	    //.ATOPS          ( 1'b0            ), // NOT SUPPORTED I

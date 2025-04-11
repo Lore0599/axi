@@ -1,0 +1,334 @@
+// - Florian Zaruba <zarubaf@iis.ee.ethz.ch>		      |	// - Lorenzo Leone <lleone@ethz.ch>
+// - Wolfgang Roenninger <wroennin@iis.ee.ethz.ch>	      |	// Based on:
+							      >	// - tb_axi_xbar_pkg.sv
+package tb_axi_xbar_pkg;				      |	package tb_axi_reduction_xbar_pkg;
+  class axi_xbar_monitor #(				      |	  class axi_reduction_xbar_monitor #(
+							      >	    parameter int unsigned OpcodeWidth,
+							      >	    parameter int unsigned NoRedPorts,
+							      >	    parameter type         data_t,
+							      >	    typedef logic [OpcodeWidth-1:0]       opcode_t;
+							      >	      axi_addr_t     slv_axi_reduction_mask;
+							      >	    // --------------------------------------
+							      >	    // Extra for W data check
+							      >	    typedef struct packed {
+							      >	      slv_axi_id_t   slv_axi_id;
+							      >	      axi_addr_t     mst_reduction_mask;
+							      >	      axi_addr_t     mst_start_addr;
+							      >	      opcode_t       opcode;
+							      >	      int            aw_len;
+							      >	      bit            is_reduction;
+							      >	      int unsigned   cnt_red;
+							      >	      int unsigned   to_slv_idx;
+							      >	    } exp_ax_mst_info_t;
+							      >
+							      >	    typedef struct packed {
+							      >	      slv_axi_id_t  slv_axi_id;
+							      >	      axi_addr_t    slv_axi_reduction_mask;
+							      >	      opcode_t      slv_axi_opcode;
+							      >	      int           aw_len;
+							      >	    } exp_ax_slv_info_t;
+							      >
+							      >	    typedef struct packed {
+							      >	      data_t data;
+							      >	      logic  last;
+							      >	    } exp_w_t;
+							      >
+							      >	    typedef rand_id_queue_pkg::rand_id_queue #(
+							      >	      .data_t   ( exp_w_t    ),
+							      >	      .ID_WIDTH ( AxiIdWidthSlaves )
+							      >	    ) slave_w_exp_queue_t;
+							      >
+							      >	    // --------------------------------------    
+							      >
+    ax_queue_t         exp_aw_queue [NoSlaves-1:0];	      |	    ax_queue_t          exp_aw_queue [NoSlaves-1:0];
+    slave_exp_t        exp_w_fifo   [NoSlaves-1:0][$];	      |	    slave_exp_t         exp_w_fifo   [NoSlaves-1:0][$];
+    slave_exp_t        act_w_fifo   [NoSlaves-1:0][$];	      |	    slave_exp_t         act_w_fifo   [NoSlaves-1:0][$];
+    master_exp_queue_t exp_b_queue  [NoMasters-1:0];	      |	    master_exp_queue_t  exp_b_queue  [NoMasters-1:0];
+							      >
+							      >	    exp_w_t             mst_w_fifo        [NoMasters-1:0][$];
+							      >	    exp_ax_mst_info_t   mst_aw_info       [NoMasters-1:0][$];
+							      >	    slave_w_exp_queue_t exp_w_output      [NoSlaves-1:0];
+							      >	    exp_w_t             act_w_output      [NoSlaves-1:0][$];
+							      >	    exp_ax_slv_info_t   slv_aw_info       [NoSlaves-1:0][$];
+							      >
+    ax_queue_t            exp_ar_queue  [NoSlaves-1:0];	      |	    ax_queue_t            exp_ar_queue [NoSlaves-1:0];
+							      >	    //-------------------------------------------
+							      >	    // Struct to handle reduction requests
+							      >	    //-------------------------------------------
+							      >	    typedef struct packed{
+							      >	      axi_addr_t first_mst_addr;
+							      >	      axi_addr_t reduction_list;
+							      >	      idx_slv_t slv_addr_dst;
+							      >	      int reduction_cnt;
+							      >	      int first_mst_idx;
+							      >	    }aw_reduction_queue_t;
+							      >
+							      >	    typedef struct packed{
+							      >	      axi_addr_t    reduction_mask;
+							      >	      axi_addr_t    start_addr;
+							      >	      data_t        reduction_result;
+							      >	      int unsigned  cnt_red;
+							      >	    }exp_w_reduction_t;
+							      >
+							      >	    aw_reduction_queue_t aw_reduction_queue     [$];
+							      >	    exp_ax_t             exp_aw_reduction_queue [NoSlaves-1:0
+							      >	    exp_w_reduction_t    mst_w_red_collect      [NoSlaves-1:0
+							      >	    exp_w_t              exp_w_reduction_output [NoSlaves-1:0
+							      >
+    // Bookkeeping					      |	    // Bookkeepin
+    std::semaphore   cnt_sem;				      |	    semaphore        cnt_sem;
+        end						      |	          this.exp_w_output[i] = new;
+							      >	        end 
+      idx_slv_t    to_slave_idx;			      |	      idx_slv_t         to_slave_idx;
+      exp_ax_t     exp_aw;				      |	      exp_ax_t          exp_aw;
+      slv_axi_id_t exp_aw_id;				      |	      exp_ax_mst_info_t exp_aw_info;
+      bit          decerr;				      |	      slv_axi_id_t      exp_aw_id;
+							      >	      bit               decerr;
+							      >	      bit               match_rule;
+							      >	      bit               aw_is_reduction;
+							      >	      axi_addr_t        mst_reduction_mask;
+							      >	      axi_addr_t        mst_addr_start;
+							      >	      axi_addr_t        rule_mask;
+							      >	      axi_addr_t        rule_addr;
+							      >	      opcode_t          opcode;
+							      >	      int               reduction_cnt = 0;
+        // send the exp aw beat down into the queue of the sl |	        // send the exp aw beat down into the queue of the sl
+          exp_aw_id = {idx_mst_t'(i), masters_axi[i].aw_id};  |	            // If the AW request is a reduction, is not neces
+          // $display("Test exp aw_id: %b",exp_aw_id);	      |	            // If the requesting master is the first of the l
+          exp_aw = '{slv_axi_id:   exp_aw_id,		      |	            // aw_reduction_queue and check if the list match
+                     slv_axi_addr: masters_axi[i].aw_addr,    |
+                     slv_axi_len:  masters_axi[i].aw_len   }; |	            //  typedef struct packed {
+          this.exp_aw_queue[to_slave_idx].push(exp_aw_id, exp |	            //      axi_addr_t first_mst_addr;  -->   addres 
+          incr_expected_tests(3);			      |	            //      axi_addr_t reduction_list;  -->   mask co
+          $display("%0tns > Master %0d: AW to Slave %0d: Axi  |	            //      idx_slv_t slv_addr_dst;     -->   destina
+              $time, i, to_slave_idx, masters_axi[i].aw_id);  |	            //      int reduction_cnt;          -->   counter
+							      >	            //      int first_mst_idx;          -->   index o
+							      >	            //  } aw_reduction_queue_t
+							      >
+							      >	            // If the requesting master is not the first to a
+							      >	            // When the counter reaches zero, all the masters
+							      >	            // the b_exp_queue.
+							      >
+							      >	            mst_reduction_mask = masters_axi[i].aw_user[AxiUs
+							      >	            opcode             = masters_axi[i].aw_user[Opcod
+							      >	            mst_addr_start     = AddrMap[i].start_addr;
+							      >	            reduction_cnt      = 0;
+							      >	            aw_is_reduction    = 0;
+							      >	            // Check if the AW is a reduction and eventually 
+							      >	            if (mst_reduction_mask != '0 ) begin//&& opcode[0
+							      >	              for (int k = 0; k < NoRedPorts; k++) begin
+							      >	                rule_mask = AddrMap[k].end_addr - AddrMap[k].
+							      >	                rule_addr = AddrMap[k].start_addr;
+							      >	                match_rule = &(~(mst_addr_start ^ rule_addr) 
+							      >	                if (match_rule && k != i) begin
+							      >	                  reduction_cnt++;
+							      >	                  aw_is_reduction = 1;
+							      >	                end
+							      >	              end
+							      >	            end
+							      >	            // Normal AW request: fill the queue slave with t
+							      >	            if (!aw_is_reduction) begin
+							      >	              exp_aw_id = {idx_mst_t'(i), masters_axi[i].aw_i
+							      >	              exp_aw = '{slv_axi_id:   exp_aw_id,
+							      >	                        slv_axi_addr: masters_axi[i].aw_addr,
+							      >	                        slv_axi_reduction_mask: mst_reduction
+							      >	                        slv_axi_len:  masters_axi[i].aw_len  
+							      >	              this.exp_aw_queue[to_slave_idx].push(exp_aw_id,
+							      >	              incr_expected_tests(4);
+							      >	              $display("%0tns > Master %0d: AW to Slave %0d: 
+							      >	                  $time, i, to_slave_idx, masters_axi[i].aw_i
+							      >
+							      >	            end else begin
+							      >	                match_rule = 1'b0;
+							      >	                for (int j = 0; j < aw_reduction_queue.size()
+							      >	                  //match_rule = ~|(mst_reduction_mask ^ aw_r
+							      >	                  match_rule = &(~(mst_addr_start ^ aw_reduct
+							      >	                                  mst_reduction_mask | aw_red
+							      >	                  if (match_rule && (mst_reduction_mask == aw
+							      >	                    aw_reduction_queue[j].reduction_cnt--;
+							      >	                    if (aw_reduction_queue[j].reduction_cnt =
+							      >	                      // Push Slave Queue with expected value
+							      >	                      exp_aw_id = {idx_mst_t'(0), masters_axi
+							      >	                      exp_aw = '{slv_axi_id:   exp_aw_id,
+							      >	                                slv_axi_addr: aw_reduction_qu
+							      >	                                slv_axi_reduction_mask: aw_re
+							      >	                                slv_axi_len:  masters_axi[i].
+							      >	                      this.exp_aw_reduction_queue[to_slave_id
+							      >	                      incr_expected_tests(4);
+							      >	                      $display("%0tns > Master %0d: AW Reduct
+							      >	                          $time, i, to_slave_idx, masters_axi
+							      >	                      aw_reduction_queue.delete(j);
+							      >	                    end else begin
+							      >	                      $display("%0tns > Master %0d: AW Reduct
+							      >	                              $time, i, to_slave_idx, masters
+							      >	                    end
+							      >	                    break;
+							      >	                  end else begin
+							      >	                    match_rule = 0;
+							      >	                  end
+							      >	                end
+							      >	                if (!match_rule) begin
+							      >	                  aw_reduction_queue.push_back({mst_addr_star
+							      >	                  $display("%0tns > Master %0d: AW Reduction 
+							      >	                          $time, i, to_slave_idx, masters_axi
+							      >	                end
+							      >	            end
+							      >	            // ------- Collect info for W prediction anyway -
+							      >	            exp_aw_info.slv_axi_id      = exp_aw_id;
+							      >	            exp_aw_info.aw_len          = int'(masters_axi[i]
+							      >	            exp_aw_info.to_slv_idx      = to_slave_idx;
+							      >	            exp_aw_info.is_reduction    = aw_is_reduction;
+							      >	            exp_aw_info.opcode          = opcode;
+							      >	            exp_aw_info.cnt_red         = reduction_cnt;
+							      >	            exp_aw_info.mst_start_addr  = mst_addr_start;
+							      >	            exp_aw_info.mst_reduction_mask = mst_reduction_ma
+							      >	            this.mst_aw_info[i].push_back(exp_aw_info);
+							      >	            // ----------------------------------------------
+        exp_b = '{mst_axi_id: masters_axi[i].aw_id, last: 1'b |	        // In case of reductions, each Masters will populate 
+        this.exp_b_queue[i].push(masters_axi[i].aw_id, exp_b) |	        // it is ready on the XBAR, i.e. whne there is the ha
+        incr_expected_tests(1);				      |	          exp_b = '{mst_axi_id: masters_axi[i].aw_id, last: 1
+        $display("        Expect B response.");		      |	          this.exp_b_queue[i].push(masters_axi[i].aw_id, exp_
+							      >	          incr_expected_tests(1);
+							      >	          $display("        Expect B response.");
+							      >
+							      >	          //throw an error if a reduction atop is attempted (
+							      >	          if (reduction_cnt > 1) $fatal("Reduction ATOPs are 
+      exp_ax_t    exp_aw;				      |	      exp_ax_t          exp_aw;
+      slave_exp_t exp_slv_w;				      |	      slave_exp_t       exp_slv_w;
+							      >	      exp_ax_slv_info_t exp_slv_aw_info;
+							      >	      bit               aw_is_reduction;
+        exp_aw = this.exp_aw_queue[i].pop_id(slaves_axi[i].aw |	        if (slaves_axi[i].aw_user[AxiUserWidth-1:OpcodeWidth]
+							      >	          aw_is_reduction = 1'b1;
+							      >	          exp_aw = this.exp_aw_reduction_queue[i].pop_front()
+							      >	          //exp_aw.slv_axi_id = {slaves_axi[i].aw_id[AxiIdWid
+							      >	          exp_aw.slv_axi_id = slaves_axi[i].aw_id;
+							      >	        end else begin
+							      >	          aw_is_reduction = 1'b0;
+							      >	          exp_aw = this.exp_aw_queue[i].pop_id(slaves_axi[i].
+							      >	        end
+							      >	        if (exp_aw.slv_axi_reduction_mask != slaves_axi[i].aw
+							      >	          incr_failed_tests(1);
+							      >	          $warning("Slave %0d: Unexpected AW with ID: %b and 
+							      >	                    i, slaves_axi[i].aw_id, slaves_axi[i].aw_
+							      >	        end
+        incr_conducted_tests(3);			      |	        incr_conducted_tests(4);
+        incr_expected_tests(slaves_axi[i].aw_len + 1);	      |	        incr_expected_tests(2*(slaves_axi[i].aw_len + 1));
+        for (int unsigned j = 0; j <= slaves_axi[i].aw_len; j |	        exp_slv_aw_info.aw_len                  = int'(slaves
+          exp_slv_w = (j == slaves_axi[i].aw_len) ?	      |	        exp_slv_aw_info.slv_axi_id              = slaves_axi[
+              '{slv_axi_id: slaves_axi[i].aw_id, last: 1'b1}  |	        exp_slv_aw_info.slv_axi_opcode          = slaves_axi[
+              '{slv_axi_id: slaves_axi[i].aw_id, last: 1'b0}; |	        exp_slv_aw_info.slv_axi_reduction_mask  = slaves_axi[
+          this.exp_w_fifo[i].push_back(exp_slv_w);	      |	        this.slv_aw_info[i].push_back(exp_slv_aw_info);
+        end						      <
+							      >	    // This task just pushes every W beat sent on a slave por
+							      >	    task automatic monitor_mst_w(input int unsigned i);
+							      >	      exp_w_t  arriving_w_struct;
+							      >	      if (masters_axi[i].w_valid && masters_axi[i].w_ready) b
+							      >	        arriving_w_struct.data = masters_axi[i].w_data;
+							      >	        arriving_w_struct.last = masters_axi[i].w_last;
+							      >	        this.mst_w_fifo[i].push_back(arriving_w_struct);
+							      >	      end
+							      >	    endtask : monitor_mst_w
+							      >
+      slave_exp_t     act_slv_w;			      |	      //slave_exp_t     act_slv_w;
+							      >	      exp_w_t   act_slv_w;
+        // $display("%0t > W beat on Slave %0d, last flag: %b |	        act_slv_w.data = slaves_axi[i].w_data;
+        act_slv_w = '{last: slaves_axi[i].w_last , default:'0 |	        act_slv_w.last = slaves_axi[i].w_last;
+        this.act_w_fifo[i].push_back(act_slv_w);	      |	        this.act_w_output[i].push_back(act_slv_w);
+							      >	    // This task look into the exp_w_input queue of each mast
+							      >	    // it computes the expected W beats for the slave ports.
+							      >	    task check_mst_w( input int unsigned i);
+							      >	      exp_ax_mst_info_t   aw_info;
+							      >	      exp_w_t             w_input;
+							      >	      axi_addr_t          tested_start_addr;
+							      >	      axi_addr_t          tested_reduction_mask;
+							      >	      data_t              reduction_result;
+							      >	      int unsigned w_cnt;
+							      >	      bit          match;
+							      >
+							      >	      w_cnt = 0;
+							      >	      while (this.mst_aw_info[i].size() != 1'b0 && this.mst_w
+							      >	        aw_info = this.mst_aw_info[i][0];
+							      >	        w_input = this.mst_w_fifo[i].pop_front();
+							      >	        // If normal transaction, just push the received W be
+							      >	        if (!aw_info.is_reduction) begin
+							      >	          this.exp_w_output[aw_info.to_slv_idx].push(aw_info.
+							      >	        end else begin
+							      >	          // If reduction, check if some of the involved mast
+							      >	          match = 0;
+							      >	          for (int i = 0; i < this.mst_w_red_collect[aw_info.
+							      >	            tested_start_addr     = this.mst_w_red_collect[aw
+							      >	            tested_reduction_mask = this.mst_w_red_collect[aw
+							      >	            match                 = &(~(aw_info.mst_start_add
+							      >	                                    | aw_info.mst_reduction_m
+							      >	            // someone already sent W_DATA, compute the parti
+							      >	            if (match && (aw_info.mst_reduction_mask == teste
+							      >	              unique case (aw_info.opcode[OpcodeWidth-1:1]) /
+							      >	                0 : begin
+							      >	                  this.mst_w_red_collect[aw_info.to_slv_idx][
+							      >	                end
+							      >	              endcase
+							      >	              this.mst_w_red_collect[aw_info.to_slv_idx][i].c
+							      >	              // If the actual master is the LAST, push the e
+							      >	              if (this.mst_w_red_collect[aw_info.to_slv_idx][
+							      >	                reduction_result = this.mst_w_red_collect[aw_
+							      >	                this.exp_w_reduction_output[aw_info.to_slv_id
+							      >	                this.mst_w_red_collect[aw_info.to_slv_idx].de
+							      >	              end
+							      >	              break;
+							      >	            end else begin
+							      >	              match = 0;
+							      >	            end
+							      >	          end
+							      >	          if (!match) begin
+							      >	            this.mst_w_red_collect[aw_info.to_slv_idx].push_b
+							      >	                                                             
+							      >	                                                             
+							      >	                                                             
+							      >	          end
+							      >	        end
+							      >	        if (aw_info.aw_len != 0) begin
+							      >	          this.mst_aw_info[i][0].aw_len--;
+							      >	        end else begin
+							      >	          this.mst_aw_info[i].delete(0);
+							      >	        end
+							      >	      end
+							      >	    endtask : check_mst_w
+							      >
+      slave_exp_t exp_w, act_w;				      |	      slave_exp_t       exp_w, act_w;
+      while (this.exp_w_fifo[i].size() != 0 && this.act_w_fif |	      exp_w_t           slv_exp_w, slv_act_w;
+							      |	      exp_ax_slv_info_t aw_info;
+        exp_w = this.exp_w_fifo[i].pop_front();		      |	      while (this.slv_aw_info[i].size() != 0 && this.act_w_ou
+        act_w = this.act_w_fifo[i].pop_front();		      |	        aw_info = this.slv_aw_info[i][0];
+        // do the check					      |	        slv_act_w  = this.act_w_output[i].pop_front();
+        incr_conducted_tests(1);			      |	        if (aw_info.slv_axi_reduction_mask == '0 || aw_info.s
+        if(exp_w.last != act_w.last) begin		      |	          slv_exp_w  = this.exp_w_output[i].pop_id(aw_info.sl
+							      >	        end else begin
+							      >	          slv_exp_w  = this.exp_w_reduction_output[i].pop_fro
+							      >	        end
+							      >	      //   do the check
+							      >	        if (slv_act_w.last != slv_exp_w.last) begin
+          $warning("Slave %d: unexpected W beat last flag %b, |	           $warning("Slave %d: unexpected W beat last flag %b
+                 i, act_w.last, exp_w.last);		      |	                    i, slv_act_w.last, slv_exp_w.last);
+							      >	        end
+							      >	        if (slv_act_w.data != slv_exp_w.data) begin
+							      >	          incr_failed_tests(1);
+							      >	           $warning("Slave %d: unexpected W beat data %h, exp
+							      >	                    i, slv_act_w.data, slv_exp_w.data);
+							      >	        end
+							      >	        incr_conducted_tests(2);
+							      >	        if (aw_info.aw_len != 0) begin
+							      >	          this.slv_aw_info[i][0].aw_len--;
+							      >	        end else begin
+							      >	          this.slv_aw_info[i].delete(0); // same as pop
+							      >	                         slv_axi_reduction_mask: {AxiAddrWidt
+							      >	              proc_mst_w: begin
+							      >	                for (int unsigned i = 0; i < NoMasters; i++) 
+							      >	                  monitor_mst_w(i);
+							      >	                end
+							      >	              end
+							      >	            proc_check_mst_w: begin
+							      >	              for (int unsigned i = 0; i < NoMasters; i++) be
+							      >	                check_mst_w(i);
+							      >	              end
+							      >	            end
+  endclass : axi_xbar_monitor				      |	  endclass : axi_reduction_xbar_monitor

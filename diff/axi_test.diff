@@ -1,0 +1,462 @@
+// - Andreas Kurth <akurth@iis.ee.ethz.ch>		      |	// - Lorenzo Leone <lleone@ethz.ch>
+// - Wolfgang Roenninger <wroennin@iis.ee.ethz.ch>	      |	// Based on:
+// - Fabian Schuiki <fschuiki@iis.ee.ethz.ch>		      |	// - axi_test.sv
+// - Thomas Benz <tbenz@iis.ee.ethz.ch>			      <
+// - Matheus Cavalcante <matheusd@iis.ee.ethz.ch>	      <
+package axi_test;					      |	package axi_reduction_test;
+    parameter int unsigned AW = 32,			      |	    parameter AW = 32,
+    parameter int unsigned IW = 8 ,			      |	    parameter IW = 8 ,
+    parameter int unsigned UW = 1			      |	    parameter UW = 1
+    parameter int unsigned DW = 32,			      |	    parameter DW = 32,
+    parameter int unsigned UW = 1			      |	    parameter UW = 1
+    parameter int unsigned IW = 8,			      |	    parameter IW = 8,
+    parameter int unsigned UW = 1			      |	    parameter UW = 1
+    parameter int unsigned DW = 32,			      |	    parameter DW = 32,
+    parameter int unsigned IW = 8 ,			      |	    parameter IW = 8 ,
+    parameter int unsigned UW = 1			      |	    parameter UW = 1
+    parameter int unsigned AW = 32  ,			      |	    parameter int  AW = 32  ,
+    parameter int unsigned DW = 32  ,			      |	    parameter int  DW = 32  ,
+    parameter int unsigned IW = 8   ,			      |	    parameter int  IW = 8   ,
+    parameter int unsigned UW = 1   ,			      |	    parameter int  UW = 1   ,
+    parameter time         TA = 0ns , // stimuli application  |	    parameter time TA = 0ns , // stimuli application time
+    parameter time         TT = 0ns   // stimuli test time    |	    parameter time TT = 0ns   // stimuli test time
+  class axi_rand_master #(				      |	  class axi_reduction_rand_master #(
+							      >	    // Extra parameters to handle reduction requests
+							      >	    parameter type   rule_t,
+							      >	    parameter int    NoAddrRules      = 32'd2,
+							      >	    parameter int    NoMsts           = 32'd2,
+							      >	    parameter int    NoSlvs           = 32'd2,
+							      >	    parameter int    NoRedPorts       = 32'd0,
+							      >	    parameter int    NoWrites         = 32'd20,
+							      >	    parameter bit    ENABLE_REDUCTION = 1'b0,
+							      >	    parameter int    ReductionId,
+							      >	    parameter rule_t [NoAddrRules-1:0] AddrMap,
+							      >
+    parameter int   N_AXI_IDS = 2**IW,			      |	    parameter int   N_AXI_IDS = 2**IW
+    parameter int   AX_USER_RANGE = 1,  // The upper limit of <
+    parameter bit   AX_USER_RAND = 0    // set to 1 to enable <
+                                        // 0 <= user < AX_USE <
+    typedef axi_test::axi_driver #(			      |	    typedef axi_reduction_test::axi_driver #(
+    std::semaphore cnt_sem;				      |	    semaphore cnt_sem;
+    ax_beat_t aw_queue[$],				      |	    static ax_beat_t  aw_queue[NoMsts-1:0][$];  // Static arr
+              w_queue[$],				      |	    ax_beat_t         w_queue[$];
+              excl_queue[$];				      |	    ax_beat_t         excl_queue[$];
+      int unsigned size ;				      <
+							      >	    // ------------------------------------------------------
+							      >	    // |                            Variables to manage the g
+							      >	    // ------------------------------------------------------
+							      >
+							      >	    localparam int unsigned OpcodeWidth = 2;           // OPC
+							      >	    typedef logic[OpcodeWidth-1:0] opcode_t;
+							      >	    
+							      >	    int ReductionProb;                                     //
+							      >	    static int cnt_generated_AW[NoMsts-1:0];               //
+							      >	    static int cnt_mst_waiting_reductions[NoRedPorts-1:0]; //
+							      >
+							      >	    typedef struct packed {                     // Structure 
+							      >	      addr_t      reduction_list;               // Mask conta
+							      >	      opcode_t    OPCODE;                       // OPCODE to 
+							      >	      addr_t      slv_destination;              // Address of
+							      >	      len_t       len;                          // Length of 
+							      >	      size_t      size;                         // Size of ea
+							      >	      burst_t     burst;                        // Burst type
+							      >	      int         slv_dst_idx;                  // Index of t
+							      >	    } create_reductions_t;
+							      >	    static create_reductions_t create_reductions_queue[NoRedP
+							      >
+							      >	    static semaphore reduction_create_sem = new(1); // Sempah
+							      >	    int mst_idx = 0;                         // Index of the 
+							      >	    
+							      >	    // ------------------------------------------------------
+							      >	    // ------------------------------------------------------
+							      >
+							      >
+							      >	      cnt_generated_AW = '{default: 0};
+							      >	      cnt_mst_waiting_reductions = '{default: 0};
+    function void add_memory_region(input addr_t addr_begin,  |	    //Method to assign the index of the master passed by argu
+      mem_map.push_back({addr_begin, addr_end, mem_type});    |	    function void set_mst_idx(int master_index);
+							      >	      this.mst_idx = master_index;
+							      >	      cnt_mst_waiting_reductions[mst_idx] = 0;
+							      >	    endfunction
+							      >	    // Method to assign the probability to the internal attri
+							      >	    function void set_reduction_probability(int probability);
+							      >	      ReductionProb = probability;
+    function void clear_memory_regions();		      |	    function void add_memory_region(input addr_t addr_begin, 
+       mem_map.delete();				      |	      mem_map.push_back({addr_begin, addr_end, mem_type});
+      int unsigned size = -1;				      <
+        traffic_shape.push_back({len, size, freq});	      |	        traffic_shape.push_back({len, freq});
+        traffic_shape.push_back({len, size, traffic_shape[$]. |	        traffic_shape.push_back({len, traffic_shape[$].cprob 
+    function void add_traffic_shaping_with_size(input int uns |	    task new_rand_burst (input logic is_read, inout ax_beat_t
+      if (traffic_shape.size() == 0)			      <
+        traffic_shape.push_back({len, size, freq});	      <
+      else						      <
+        traffic_shape.push_back({len, size, traffic_shape[$]. <
+							      <
+      max_cprob = traffic_shape[$].cprob;		      <
+    endfunction : add_traffic_shaping_with_size		      <
+							      <
+    /// Cache-Partition					      <
+    // This function is used to generate a random PatID every <
+    // burst of R/W requests down to the cache. Therefore, wi <
+    // its PatID will be fixed and we can call multiple tests <
+    // partition functionalities. 			      <
+    function user_t rand_user(input int unsigned user_range,  <
+      static logic rand_success;			      <
+      automatic user_t user;				      <
+      if (user_rand) begin				      <
+        rand_success = std::randomize(user) with {	      <
+          user >= 0; user < user_range;			      <
+        }; assert(rand_success);			      <
+      end else begin					      <
+        user = '0;					      <
+      end						      <
+      return user;					      <
+    endfunction						      <
+							      <
+    // Cache-Partition: add user signal as an input 	      <
+    function ax_beat_t new_rand_burst(input logic is_read, in <
+      automatic ax_beat_t ax_beat = new;		      <
+							      >	      //-----------------------------------------------------
+							      >	      // Variables for the reduction transactions
+							      >	      automatic bit       aw_is_reduction;
+							      >	      automatic int       write_left;
+							      >	      automatic int       slv_dst_idx;
+							      >	      automatic addr_t    reduction_mask;
+							      >	      automatic addr_t    slv_dst_addr;
+							      >	      automatic opcode_t  OPCODE;             
+							      >	      //-----------------------------------------------------
+							      >
+            size = traffic_shape[i].size;		      <
+          if(size==-1) begin				      |	          rand_success = std::randomize(size) with {
+             rand_success = std::randomize(size) with {	      |	            2**size <= AXI_STRB_WIDTH;
+               2**size <= AXI_STRB_WIDTH;		      |	            2**size <= len;
+               2**size <= len;				      |	          }; assert(rand_success);
+             }; assert(rand_success);			      |	          ax_beat.ax_size = size;
+             ax_beat.ax_size = size;			      |	          ax_beat.ax_len = ((len + (1 << size) - 1) >> size) 
+             ax_beat.ax_len = ((len + (1 << size) - 1) >> siz <
+          end else begin				      <
+             ax_beat.ax_size = size;			      <
+             ax_beat.ax_len = len;			      <
+          end						      <
+          if (axi_pkg::beat_addr(addr, ax_beat.ax_size, ax_be |	          if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
+              axi_pkg::beat_addr(addr, ax_beat.ax_size, ax_be |	            if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (
+            break;					      |	              break;
+							      >	            end
+							      >	          end else begin // BURST_INCR
+							      >	            if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len
+							      >	              break;
+							      >	            end
+          if (axi_pkg::beat_addr(addr, ax_beat.ax_size, ax_be |	          if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
+              axi_pkg::beat_addr(addr, ax_beat.ax_size, ax_be |	            if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (
+            break;					      |	              break;
+							      >	            end
+							      >	          end else begin // BURST_INCR, BURST_WRAP
+							      >	            if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len
+							      >	              break;
+							      >	            end
+      ax_beat.ax_addr =  axi_pkg::aligned_addr(addr, axi_pkg: |	      //ax_beat.ax_addr =  axi_pkg::aligned_addr(addr, axi_pk
+							      >	      slv_dst_addr = axi_pkg::aligned_addr(addr, axi_pkg::siz
+							      >
+							      >
+							      >	      // ----------------------------------------------------
+							      >	      // Random generation of the reduction command
+							      >	      // 
+							      >	      // TODO: extend TB such that with ATOP=1 it might gener
+							      >	      // not an atomic reduction. For the moment, when you wa
+							      >	      if (ENABLE_REDUCTION && !is_read && this.mst_idx < NoRe
+							      >	        //$display(" REDUCTION generation ");
+							      >	        write_left = NoWrites - cnt_generated_AW[mst_idx];
+							      >
+							      >	        rand_success = std::randomize(aw_is_reduction) with {
+							      >	          aw_is_reduction dist {0 := (100-ReductionProb), 1 :
+							      >	          write_left <= cnt_mst_waiting_reductions[mst_idx] -
+							      >	        }; assert(rand_success);
+							      >	        
+							      >	        if (aw_is_reduction) begin
+							      >	          //aw_is_reduction = 1;
+							      >	          reduction_create_sem.get();
+							      >
+							      >	          if (create_reductions_queue[this.mst_idx].size() !=
+							      >	            reduction_mask = create_reductions_queue[this.mst
+							      >	            OPCODE         = create_reductions_queue[this.mst
+							      >	            slv_dst_addr   = create_reductions_queue[this.mst
+							      >	            len            = create_reductions_queue[this.mst
+							      >	            size           = create_reductions_queue[this.mst
+							      >	            burst          = create_reductions_queue[this.mst
+							      >	            if (ReductionId >= 0) begin
+							      >	              id  = id_t'(ReductionId);
+							      >	            end
+							      >	            create_reductions_queue[this.mst_idx].delete(0);
+							      >	          end else begin  // generate reduction information a
+							      >	            if (ReductionId >= 0) begin
+							      >	              id  = id_t'(ReductionId);
+							      >	            end
+							      >	            len   = '0;   //Reduction transactions can have o
+							      >	            burst = '0;
+							      >	            generate_reduction(reduction_mask, OPCODE, slv_ds
+							      >	          end
+							      >
+							      >	          reduction_create_sem.put();
+							      >	        end else begin
+							      >	          reduction_mask = '0;
+							      >	          OPCODE = '0;
+							      >	          slv_dst_idx = 0;
+							      >	        end
+							      >	        ax_beat.ax_user          = {reduction_mask,OPCODE};
+							      >	        $display("     REDUCTION GENERATION > Master: %0d, aw
+							      >	                  mst_idx, aw_is_reduction, reduction_mask, O
+							      >	      end 
+							      >	      // Overwrite the parameters.
+							      >	      // Necessary to maintain the coeherence among the invol
+							      >	      ax_beat.ax_len  = len;
+							      >	      ax_beat.ax_size = size;
+							      >	      ax_beat.ax_addr = slv_dst_addr;
+							      >
+      ax_beat.ax_user = user;				      |	      //return c;
+      return ax_beat;					      |	    endtask
+    endfunction						      <
+    task rand_atop_burst(inout ax_beat_t beat, input user_t u |	    task rand_atop_burst(inout ax_beat_t beat);
+      forever begin					      |	      beat.ax_atop[5:4] = $random();
+        beat.ax_atop[5:4] = $random();			      |	      if (beat.ax_atop[5:4] != 2'b00 && !AXI_BURST_INCR) begi
+        if (beat.ax_atop[5:4] != 2'b00 && !AXI_BURST_INCR) be |	        // We can emit ATOPs only if INCR bursts are allowed.
+          // We can emit ATOPs only if INCR bursts are allowe |	        $warning("ATOP suppressed because INCR bursts are dis
+          $warning("ATOP suppressed because INCR bursts are d |	        beat.ax_atop[5:4] = 2'b00;
+          beat.ax_atop[5:4] = 2'b00;			      |	      end
+        end						      |	      if (beat.ax_atop[5:4] != 2'b00) begin // ATOP
+        if (beat.ax_atop[5:4] != 2'b00) begin // ATOP	      |	        // Determine `ax_atop`.
+          // Determine `ax_atop`.			      |	        if (beat.ax_atop[5:4] == axi_pkg::ATOP_ATOMICSTORE ||
+          if (beat.ax_atop[5:4] == axi_pkg::ATOP_ATOMICSTORE  |	            beat.ax_atop[5:4] == axi_pkg::ATOP_ATOMICLOAD) be
+              beat.ax_atop[5:4] == axi_pkg::ATOP_ATOMICLOAD)  |	          // Endianness
+            // Endianness				      |	          beat.ax_atop[3] = $random();
+            beat.ax_atop[3] = $random();		      |	          // Atomic operation
+            // Atomic operation				      |	          beat.ax_atop[2:0] = $random();
+            beat.ax_atop[2:0] = $random();		      |	        end else begin // Atomic{Swap,Compare}
+          end else begin // Atomic{Swap,Compare}	      |	          beat.ax_atop[3:1] = '0;
+            beat.ax_atop[3:1] = '0;			      |	          beat.ax_atop[0] = $random();
+            beat.ax_atop[0] = $random();		      |	        end
+          end						      |	        // Determine `ax_size` and `ax_len`.
+          // Determine `ax_size` and `ax_len`.		      |	        if (2**beat.ax_size < AXI_STRB_WIDTH) begin
+          if (2**beat.ax_size < AXI_STRB_WIDTH) begin	      |	          // Transaction does *not* occupy full data bus, so 
+            // Transaction does *not* occupy full data bus, s |	          beat.ax_len = '0;
+            beat.ax_len = '0;				      |	        end else begin
+							      >	          automatic int unsigned bytes;
+							      >	          if (beat.ax_atop == axi_pkg::ATOP_ATOMICCMP) begin
+							      >	            // Total data transferred in burst can be 2, 4, 8
+							      >	            automatic int unsigned log_bytes;
+							      >	            rand_success = std::randomize(log_bytes) with {
+							      >	              log_bytes > 0; 2**log_bytes <= 32;
+							      >	            }; assert(rand_success);
+							      >	            bytes = 2**log_bytes;
+            automatic int unsigned bytes;		      |	            // Total data transferred in burst can be 1, 2, 4
+            if (beat.ax_atop == axi_pkg::ATOP_ATOMICCMP) begi |	            if (AXI_STRB_WIDTH >= 8) begin
+              // Total data transferred in burst can be 2, 4, |	              bytes = AXI_STRB_WIDTH;
+							      >	            end else begin
+              rand_success = std::randomize(log_bytes) with { |	              rand_success = std::randomize(log_bytes); asser
+                log_bytes > 0; 2**log_bytes <= 32;	      |	              log_bytes = log_bytes % (4 - $clog2(AXI_STRB_WI
+              }; assert(rand_success);			      <
+            end else begin				      <
+              // Total data transferred in burst can be 1, 2, <
+              if (AXI_STRB_WIDTH >= 8) begin		      <
+                bytes = AXI_STRB_WIDTH;			      <
+              end else begin				      <
+                automatic int unsigned log_bytes;	      <
+                rand_success = std::randomize(log_bytes); ass <
+                log_bytes = log_bytes % (4 - $clog2(AXI_STRB_ <
+                bytes = 2**log_bytes;			      <
+              end					      <
+            beat.ax_len = bytes / AXI_STRB_WIDTH - 1;	      <
+          // Determine `ax_addr` and `ax_burst`.	      |	          beat.ax_len = bytes / AXI_STRB_WIDTH - 1;
+          if (beat.ax_atop == axi_pkg::ATOP_ATOMICCMP) begin  |	        end
+            // The address must be aligned to half the outbou |	        // Determine `ax_addr` and `ax_burst`.
+            beat.ax_addr = beat.ax_addr & ~((1'b1 << beat.ax_ |	        if (beat.ax_atop == axi_pkg::ATOP_ATOMICCMP) begin
+            // If the address is aligned to the total size of |	          // The address must be aligned to half the outbound
+            // INCR. Otherwise, it must be WRAP. [E1.1.3]     |	          beat.ax_addr = beat.ax_addr & ~((1'b1 << beat.ax_si
+            beat.ax_burst = (beat.ax_addr % ((beat.ax_len+1)  |	          // If the address is aligned to the total size of o
+                axi_pkg::BURST_INCR : axi_pkg::BURST_WRAP;    |	          // INCR. Otherwise, it must be WRAP. [E1.1.3]
+            // If we are not allowed to emit WRAP bursts, ali |	          beat.ax_burst = (beat.ax_addr % ((beat.ax_len+1) * 
+            // outgoing data and fall back to INCR.	      |	              axi_pkg::BURST_INCR : axi_pkg::BURST_WRAP;
+            if (beat.ax_burst == axi_pkg::BURST_WRAP && !AXI_ |	          // If we are not allowed to emit WRAP bursts, align
+              beat.ax_addr -= (beat.ax_addr % ((beat.ax_len+1 |	          // outgoing data and fall back to INCR.
+              beat.ax_burst = axi_pkg::BURST_INCR;	      |	          if (beat.ax_burst == axi_pkg::BURST_WRAP && !AXI_BU
+            end						      |	            beat.ax_addr -= (beat.ax_addr % ((beat.ax_len+1) 
+          end else begin				      <
+            // The address must be aligned to the data size.  <
+            beat.ax_addr = beat.ax_addr & ~((1'b1 << (beat.ax <
+            // Only INCR allowed.			      <
+          // Make sure that the burst does not cross a 4KiB b |	        end else begin
+          if (axi_pkg::beat_addr(beat.ax_addr, beat.ax_size,  |	          // The address must be aligned to the data size. [E
+              axi_pkg::beat_addr(beat.ax_addr, beat.ax_size,  |	          beat.ax_addr = beat.ax_addr & ~((1'b1 << (beat.ax_s
+            break;					      |	          // Only INCR allowed.
+          end else begin				      |	          beat.ax_burst = axi_pkg::BURST_INCR;
+            beat = new_rand_burst(1'b0, user);		      <
+          end						      <
+    function void rand_excl_ar(inout ax_beat_t ar_beat, input |	    function void rand_excl_ar(inout ax_beat_t ar_beat);
+      forever begin					      |	      ar_beat.ax_lock = $random();
+        ar_beat.ax_lock = $random();			      |	      if (ar_beat.ax_lock) begin
+        if (ar_beat.ax_lock) begin			      |	        automatic logic rand_success;
+          automatic logic rand_success;			      |	        automatic int unsigned n_bytes;
+          automatic int unsigned n_bytes;		      |	        automatic size_t size;
+          automatic size_t size;			      |	        automatic addr_t addr_mask;
+          automatic addr_t addr_mask;			      |	        // In an exclusive burst, the number of bytes to be t
+          // In an exclusive burst, the number of bytes to be |	        // 1, 2, 4, 8, 16, 32, 64, or 128 bytes, and the burs
+          // 1, 2, 4, 8, 16, 32, 64, or 128 bytes, and the bu |	        static int unsigned ul = (AXI_STRB_WIDTH < 8) ? 4 + $
+          int unsigned ul = (AXI_STRB_WIDTH < 8) ? 4 + $clog2 |	        rand_success = std::randomize(n_bytes) with {
+          rand_success = std::randomize(n_bytes) with {	      |	          n_bytes >= 1;
+            n_bytes >= 1;				      |	          n_bytes <= ul;
+            n_bytes <= ul;				      |	        }; assert(rand_success);
+          }; assert(rand_success);			      |	        n_bytes = 2**n_bytes;
+          n_bytes = 2**n_bytes;				      |	        rand_success = std::randomize(size) with {
+          rand_success = std::randomize(size) with {	      |	          size >= 0;
+            size >= 0;					      |	          2**size <= n_bytes;
+            2**size <= n_bytes;				      |	          2**size <= AXI_STRB_WIDTH;
+            2**size <= AXI_STRB_WIDTH;			      |	          n_bytes / 2**size <= 16;
+            n_bytes / 2**size <= 16;			      |	        }; assert(rand_success);
+          }; assert(rand_success);			      |	        ar_beat.ax_size = size;
+          ar_beat.ax_size = size;			      |	        ar_beat.ax_len = n_bytes / 2**size;
+          ar_beat.ax_len = n_bytes / 2**size;		      |	        // The address must be aligned to the total number of
+          // The address must be aligned to the total number  |	        ar_beat.ax_addr = ar_beat.ax_addr & ~(n_bytes-1);
+          ar_beat.ax_addr = ar_beat.ax_addr & ~(n_bytes-1);   <
+        end						      <
+        // Make sure that the burst does not cross a 4KiB bou <
+        if (axi_pkg::beat_addr(ar_beat.ax_addr, ar_beat.ax_si <
+            axi_pkg::beat_addr(ar_beat.ax_addr, ar_beat.ax_si <
+          break;					      <
+        end else begin					      <
+          ar_beat = new_rand_burst(1'b1, user);		      <
+        end						      <
+    // Cache-Partition: add user signal as an input 	      |	    //-------------------------------------------------------
+    task send_ars(input int n_reads, input user_t user);      |	    //|                                 Tasks for redductions
+							      >	    //-------------------------------------------------------
+							      >	    //
+							      >	    // Task to generate the reduction request in case of zero
+							      >	    // current master.
+							      >	    //
+							      >	    task generate_reduction;
+							      >	      output addr_t     reduction_mask;
+							      >	      output opcode_t   opcode;
+							      >	      input  addr_t     slv_dst_address;
+							      >	      input  len_t      len;
+							      >	      input  size_t     size;
+							      >	      input  burst_t    burst;
+							      >	      
+							      >	      automatic addr_t      mst_start_addr;     // Start addr
+							      >	      automatic int         slv_dst_idx;        // Index of t
+							      >	      automatic bit         rand_success;               
+							      >	      automatic bit         match;              // Boolean va
+							      >	      automatic bit         valid_mask;         // Boolean va
+							      >	                                                // transactio
+							      >	      automatic int         writes_left;        // How many w
+							      >	      automatic int         cnt_waiting_reductions_tmp[NoRedP
+							      >
+							      >	      mst_start_addr = AddrMap[this.mst_idx].start_addr;
+							      >
+							      >	      // The generation continues until a valid mask is gener
+							      >	      forever begin
+							      >	          rand_success = std::randomize (reduction_mask);
+							      >	          assert(rand_success);
+							      >	          // Count how many masters are involved in the reduc
+							      >	          // and check if they have enough write transactions
+							      >	          valid_mask = 1;
+							      >	          cnt_waiting_reductions_tmp  = '{default:'0};
+							      >	          for (int i = 0; i < NoRedPorts; i++) begin
+							      >	              check_in_list(i, mst_start_addr, reduction_mask
+							      >	              writes_left     = NoWrites - cnt_generated_AW[i
+							      >	              if ((writes_left > cnt_mst_waiting_reductions[i
+							      >	                      cnt_waiting_reductions_tmp[i]++;
+							      >	              end else if ((writes_left <= cnt_mst_waiting_re
+							      >	                  valid_mask = 1'b0;
+							      >	                  break;
+							      >	              end
+							      >	          end
+							      >	          // make sure that none of the other masters match t
+							      >	          // since these ports cannot carry any reduction req
+							      >	          // to generate a reduction request which includes t
+							      >	          if (valid_mask) begin
+							      >	            for (int i = NoRedPorts; i < NoMsts; i++) begin
+							      >	              check_in_list(i, mst_start_addr, reduction_mask
+							      >	              if (match) begin
+							      >	                valid_mask = 1'b0;
+							      >	                break;
+							      >	              end
+							      >	            end
+							      >	          end
+							      >	          if (valid_mask) begin
+							      >	              break;
+							      >	          end
+							      >	      end
+							      >	      // TODO: random generation of the OPCODE
+							      >	      //rand_success = std::randomize (opcode);
+							      >	      //assert(rand_success);
+							      >	      opcode = '0;
+							      >
+							      >	      // Loop to understand the index in the AddrMap of the d
+							      >	      for (int i = 0; i < NoSlvs; i++) begin
+							      >	        if ((slv_dst_address >= AddrMap[i].start_addr) && (sl
+							      >	            slv_dst_idx = AddrMap[i].idx;
+							      >	        end     
+							      >	      end
+							      >
+							      >	      // Update the master reduction counters to know ho many
+							      >	      // In the same loop, use the temporary counter vector a
+							      >	      // in the current reductions. Information used later to
+							      >	      //cnt_msts_in_reduction = 0;
+							      >	      for (int i = 0; i < NoRedPorts; i++) begin
+							      >	          cnt_mst_waiting_reductions[i] += cnt_waiting_reduct
+							      >	          check_in_list(i, mst_start_addr, reduction_mask, ma
+							      >	          if (match && i != this.mst_idx) begin // Populate t
+							      >	            create_reductions_queue[i].push_back('{reduction_
+							      >	          end
+							      >	      end
+							      >	    endtask : generate_reduction
+							      >
+							      >	    //
+							      >	    //Task to check if the master participate to the reductio
+							      >	    //
+							      >	    task check_in_list;
+							      >	      input int     idx;
+							      >	      input addr_t  mst_start_addr;
+							      >	      input addr_t  reduction_mask;
+							      >	      output bit    match;
+							      >
+							      >	      addr_t rule_mask;
+							      >	      addr_t rule_start_addr;
+							      >	      int    addr_map_idx;
+							      >
+							      >	      rule_mask       = AddrMap[idx].end_addr - AddrMap[idx].
+							      >	      rule_start_addr = AddrMap[idx].start_addr;
+							      >	      match           = & (~(mst_start_addr ^ rule_start_addr
+							      >	      
+							      >	    endtask : check_in_list
+							      >
+							      >	    
+							      >	    //-------------------------------------------------------
+							      >	    //-------------------------------------------------------
+							      >	    
+							      >	    task send_ars(input int n_reads);
+        automatic ax_beat_t ar_beat = new_rand_burst(1'b1, us |	        automatic ax_beat_t ar_beat = new;
+							      >	        new_rand_burst(1'b1, ar_beat);
+          rand_excl_ar(ar_beat, user);			      |	          rand_excl_ar(ar_beat);
+        end else begin					      <
+           rand_wait(1,1);				      <
+    // Cache-Partition: add user signal as an input 	      |	    task create_aws(input int n_writes);
+    task create_aws(input int n_writes, input user_t user);   |	      automatic logic   rand_success;
+      automatic logic rand_success;			      |	      automatic int     slv_dst_idx;  
+							      >	      automatic addr_t  slv_dst_addr;
+        automatic ax_beat_t aw_beat;			      |	        automatic ax_beat_t aw_beat = new;
+          aw_beat = new_rand_burst(1'b0, user);		      |	          cnt_generated_AW[mst_idx]++;
+          if (AXI_ATOPS) rand_atop_burst(aw_beat, user);      |	          new_rand_burst(1'b0, aw_beat);
+							      >	          if (AXI_ATOPS) rand_atop_burst(aw_beat);
+        aw_queue.push_back(aw_beat);			      |	        aw_queue[this.mst_idx].push_back(aw_beat);
+        w_queue.push_back(aw_beat);			      |	        w_queue.push_back(aw_beat); 
+							      >
+      while (!(aw_done && aw_queue.size() == 0)) begin	      |	      while (!(aw_done && aw_queue[this.mst_idx].size() == 0)
+        wait (aw_queue.size() > 0 || (aw_done && aw_queue.siz |	        wait (aw_queue[this.mst_idx].size() > 0 || (aw_done &
+        aw_beat = aw_queue.pop_front();			      |	        aw_beat = aw_queue[this.mst_idx].pop_front();
+        drv.send_aw(aw_beat);				      |	        drv.send_aw(aw_beat);           
+    // Cache-Partition: add user signal as an input 	      <
+        // Cache-Partition: randomize the patid		      <
+        automatic user_t ax_user = rand_user(AX_USER_RANGE, A <
+          send_ars(n_reads, ax_user);			      |	          send_ars(n_reads);
+          create_aws(n_writes, ax_user);		      |	          create_aws(n_writes);
+    std::mailbox aw_mbx = new, w_mbx = new, b_mbx = new,      |	    mailbox aw_mbx = new, w_mbx = new, b_mbx = new,
+                 ar_mbx = new, r_mbx = new;		      |	            ar_mbx = new, r_mbx = new;
