@@ -104,6 +104,7 @@ sources:
       - src/axi_dumper.sv
       - src/axi_sim_mem.sv
       - src/axi_test.sv
+      - src/axi_reduction_test.sv
 
   - target: test
     files:
