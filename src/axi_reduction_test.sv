@@ -1565,7 +1565,7 @@ package axi_reduction_test;
 
   endclass
 
-  class axi_rand_slave #(
+  class axi_reduction_rand_slave #(
     // AXI interface parameters
     parameter int   AW = 32,
     parameter int   DW = 32,
@@ -1585,7 +1585,8 @@ package axi_reduction_test;
     /// This parameter eneables an internal memory, which gets randomly initialized, if it is read
     /// and retains written data. This mode does currently not support `axi_pkg::BURST_WRAP`!
     /// All responses are `axi_pkg::RESP_OKAY` when in this mode.
-    parameter bit   MAPPED = 1'b0
+    parameter bit   MAPPED = 1'b0,
+    parameter bit   ENABLE_EXCLUSIVE_REDUCTION = 1'b0
   );
     typedef axi_test::axi_driver #(
       .AW(AW), .DW(DW), .IW(IW), .UW(UW), .TA(TA), .TT(TT)
@@ -1779,6 +1780,14 @@ package axi_reduction_test;
         rand_wait(RESP_MIN_WAIT_CYCLES, RESP_MAX_WAIT_CYCLES);
         if (MAPPED) begin
           b_beat.b_resp = axi_pkg::RESP_OKAY;
+        end
+        // Adapt response to multicast, otherwise resp would only go to one slv
+        // TODO: Hardcoded position of Opcode (2 Bit) / Optype (4 Bit) with 32 Bit user mask
+        if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+          logic [1:0] commtype = (b_beat.b_user & 38'b00000000000000000000000000000000110000) >> 4;
+          if(commtype == 2'b11) begin
+            b_beat.b_user = (b_beat.b_user & 38'b11111111111111111111111111111111000000) | 38'b00000000000000000000000000000000010000;
+          end
         end
         drv.send_b(b_beat);
         b_wait_cnt--;
