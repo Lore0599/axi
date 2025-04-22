@@ -761,12 +761,12 @@ package axi_reduction_test;
     semaphore cnt_sem;
 
     // Var shared for the reduction; flag indicates a ongoing reduction in the system so no other should be started!
-    semaphore reduction_sem;
-    static logic f_reduction_ongoing;
+    static semaphore reduction_sem = new(1);
+    static logic f_reduction_ongoing = 1'b0;
     static user_t reduction_ongoing_mask;
 
     static ax_beat_t  aw_queue[NoMsts-1:0][$];  // Static array of queue to check for deadlock conditions during the execution of 'send_aws'
-    ax_beat_t         w_queue[$];
+    static ax_beat_t  w_queue[NoMsts-1:0][$];
     ax_beat_t         excl_queue[$];
 
     typedef struct packed {
@@ -793,6 +793,8 @@ package axi_reduction_test;
     int ReductionProb;                                     // Probability to generate a reduction request
     static int cnt_generated_AW[NoMsts-1:0];               // Array containing for each master the number of AW valids already sent to the DUT
     static int cnt_mst_waiting_reductions[NoRedPorts-1:0]; // Array containing for each master the number of reductions waiting for it 
+    static int participation_reduction_groundtruth;        // Indicates for each master bitwise if the master is involved in the reduction or not
+    static int participation_reduction_ongoing;            // Indicates from which master we received the B answer already!
 
     typedef struct packed {                     // Structure to create reduction requests without generating deadlock conditions
       addr_t      reduction_list;               // Mask containing the list of the masters that particpate in the reduction
@@ -1037,6 +1039,7 @@ package axi_reduction_test;
             if (ReductionId >= 0) begin
               id  = id_t'(ReductionId);
             end
+            // TODO: Add more option when the flag ENABLE_EXCLUSIVE_REDUCTION is set!!!
             len   = '0;   //Reduction transactions can have only a len of 1 transfer
             burst = '0;
             generate_reduction(reduction_mask, OPCODE, OPTYPE, slv_dst_addr, len, size, burst);
@@ -1050,8 +1053,6 @@ package axi_reduction_test;
           slv_dst_idx = 0;
         end
         ax_beat.ax_user          = {reduction_mask,OPCODE,OPTYPE};
-        $display("     REDUCTION GENERATION > Master: %0d, aw_is_reduction: %b, reduction_mask: %h, OPCODE: %b, OPTYPE: %b, slv_dst_addr = %h, ID: %b",
-                  mst_idx, aw_is_reduction, reduction_mask, OPCODE, OPTYPE, slv_dst_addr,id);
       end 
       // Overwrite the parameters.
       // Necessary to maintain the coeherence among the involved masters.
@@ -1265,6 +1266,8 @@ package axi_reduction_test;
                                                 // transactions to take part also to the current reduction
       automatic int         writes_left;        // How many write transactions are left 
       automatic int         cnt_waiting_reductions_tmp[NoRedPorts-1:0]  = '{default:'0};
+      automatic int         cnt_involved_slaves;
+      automatic string involved_masters;
 
       mst_start_addr = AddrMap[this.mst_idx].start_addr;
 
@@ -1275,21 +1278,28 @@ package axi_reduction_test;
           // Count how many masters are involved in the reduction list
           // and check if they have enough write transactions left.
           valid_mask = 1;
+          cnt_involved_slaves = 0;
           cnt_waiting_reductions_tmp  = '{default:'0};
           for (int i = 0; i < NoRedPorts; i++) begin
               check_in_list(i, mst_start_addr, reduction_mask, match);
               writes_left     = NoWrites - cnt_generated_AW[i];
+              // Abort the generation of the reduction if any involved master already has a scheduled reduction (deadlock potential)
+              if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx) && (create_reductions_queue[i].size() != 0)) begin
+                valid_mask = 1'b0;
+                break;
+              end
               if ((writes_left > cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
                       cnt_waiting_reductions_tmp[i]++;
+                      cnt_involved_slaves++;
               end else if ((writes_left <= cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
                   valid_mask = 1'b0;
                   break;
               end
           end
+
           // make sure that none of the other masters match the reduction mask
           // since these ports cannot carry any reduction requets, it's not possible 
           // to generate a reduction request which includes them.
-          // TODO: This could result in a problem --> I give each master a subset of adresses which are his and all the other addresses in the system
           if (valid_mask) begin
             for (int i = NoRedPorts; i < NoMsts; i++) begin
               check_in_list(i, mst_start_addr, reduction_mask, match);
@@ -1303,10 +1313,11 @@ package axi_reduction_test;
               break;
           end
       end
+
       // TODO: random generation of the OPCODE
       //rand_success = std::randomize (opcode);
       //assert(rand_success);
-      opcode = '0;
+      opcode = 2'b11; // Generate Offload Reduction
       optype = 4'b1000; // Integer Add
 
       // Loop to understand the index in the AddrMap of the destination slave necessary to update the 'reduction_info' struct
@@ -1319,14 +1330,16 @@ package axi_reduction_test;
       // Update the master reduction counters to know ho many reductions are waiting for each master
       // In the same loop, use the temporary counter vector also to compute how many masters are involved
       // in the current reductions. Information used later to set the reduction_info[][] counter.
-      //cnt_msts_in_reduction = 0;
+      involved_masters = "";
       for (int i = 0; i < NoRedPorts; i++) begin
           cnt_mst_waiting_reductions[i] += cnt_waiting_reductions_tmp[i]; // Counter for each master to know how many waiting reductions are already in-flight
           check_in_list(i, mst_start_addr, reduction_mask, match);
           if (match && i != this.mst_idx) begin // Populate the create_reduction_queue
             create_reductions_queue[i].push_back('{reduction_mask, opcode, optype, slv_dst_address, len, size, burst,slv_dst_idx});
+            involved_masters = {involved_masters, $sformatf("%1d, ", i)};
           end
       end
+      $display($time, "     MASTER GEN > ID %1d with mask: %b and masters [%s]", this.mst_idx, reduction_mask, involved_masters.substr(0, involved_masters.len()-2));
     endtask : generate_reduction
 
     //
@@ -1413,19 +1426,32 @@ package axi_reduction_test;
         end
         legalize_id(1'b0, aw_beat);
         aw_queue[this.mst_idx].push_back(aw_beat);
-        w_queue.push_back(aw_beat); 
+        w_queue[this.mst_idx].push_back(aw_beat); 
 
       end
     endtask
 
     task send_aws(ref logic aw_done);
-      automatic logic   reduction_valid;
-      automatic opcode_t opcode;
+      automatic logic       reduction_valid;
+      automatic opcode_t    opcode;
+      automatic addr_t      mst_start_addr;
+      automatic bit         match;
+      automatic addr_t      mask;
+      automatic bit         deadlock_prevention;
+      automatic int         participation_temp;
+      automatic bit         poped_element;
 
+      poped_element = 1'b0;
       while (!(aw_done && aw_queue[this.mst_idx].size() == 0)) begin
         automatic ax_beat_t aw_beat;
+
         wait (aw_queue[this.mst_idx].size() > 0 || (aw_done && aw_queue[this.mst_idx].size() == 0));
-        aw_beat = aw_queue[this.mst_idx].pop_front();
+        // For exclusive reduction: Hold the element in the queue so other master(s) see on which reduction you work on
+        if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+          aw_beat = aw_queue[this.mst_idx][0];
+        end else begin
+          aw_beat = aw_queue[this.mst_idx].pop_front();
+        end
         rand_wait(AX_MIN_WAIT_CYCLES, AX_MAX_WAIT_CYCLES);
         // Extract the opcode from the user mask to determint if we have a offload reduction or not
         opcode = aw_beat.ax_user[OpcodeWidth+OptypeWidth-1:OptypeWidth];
@@ -1434,36 +1460,111 @@ package axi_reduction_test;
           while(1) begin
             // reset variable and fetch the semaphore which locks the control mechanism
             reduction_valid = 1'b0;
+            deadlock_prevention = 1'b0;
+            mst_start_addr = AddrMap[this.mst_idx].start_addr;
+            // Determint which masters are participating in the reduction
+            generate_participation(mst_start_addr, aw_beat.ax_user[UW-1:OpcodeWidth+OptypeWidth], participation_temp);
+            // Fetch the semaphore
             reduction_sem.get();
+            // First check if any other AW Queue already has a reduction scheduled (with another mask)
+            for(int i = 0; i < NoRedPorts;i++) begin
+              if ((i != this.mst_idx) && ((participation_temp & (1 << i)) != 0)) begin
+                check_in_aw_queue(i, aw_beat.ax_user[UW-1:OpcodeWidth+OptypeWidth], deadlock_prevention);
+                if (deadlock_prevention == 1'b1) begin
+                  //$display($time, "     MASTER %1d (AW) > deadlock trigger Slv %1d - Size Queue %1d - participation next: %5b",this.mst_idx, i, aw_queue[this.mst_idx].size(), participation_temp);
+                  break;
+                end
+              end
+            end
             // Check if either no reduction is ongoing or if the master is involved in the reduction
-            if(f_reduction_ongoing == 1'b0) begin
+            if((f_reduction_ongoing == 1'b0) && (deadlock_prevention == 1'b0)) begin
               f_reduction_ongoing = 1'b1;
               reduction_ongoing_mask = aw_beat.ax_user; // Store the mask to determint if a reduction belongs to each other
+              participation_reduction_groundtruth = participation_temp; // copy the participating masters from the temp var
+              participation_reduction_ongoing = 0;
               reduction_valid = 1'b1;
-              $display($time, " The AW channel locked the Semaphor for the mask: %b", reduction_ongoing_mask);
+              $display($time, "     MASTER %1d (AW) > lock the semaphore for mask %b with involved master(s) %5b",this.mst_idx, reduction_ongoing_mask, participation_reduction_groundtruth);
             end else if(reduction_ongoing_mask == aw_beat.ax_user) begin
               reduction_valid = 1'b1;
             end
             // Return the semaphore and either break the loop or wait for a certain amount of cycle
             reduction_sem.put();
-            if(reduction_valid == 1'b1) break;
+            if(reduction_valid == 1'b1) begin
+              break;
+            end
             rand_wait(1, 5);
           end
         end
-        drv.send_aw(aw_beat);           
+        drv.send_aw(aw_beat);
+        // Delete element from queue if the exclusive reduction is enabled
+        if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+          aw_queue[this.mst_idx].pop_front(); // pop the element only after sending the data
+        end
       end
     endtask
 
-    task send_ws(ref logic aw_done);
-      automatic logic   reduction_valid;
-      automatic opcode_t opcode;
+    // This task generate a int where bits are set if the corresponding master is involved in the reduction
+    task generate_participation;
+      input addr_t  mst_start_addr;
+      input addr_t  reduction_mask;
+      output int    participation;
 
-      while (!(aw_done && w_queue.size() == 0)) begin
+      automatic bit match;
+
+      participation = 0;
+      // Go trough every master and check if he is involved in the reduction
+      for (int i = 0; i < NoRedPorts; i++) begin
+        check_in_list(i, mst_start_addr, reduction_mask, match);
+        if(match) begin
+          participation = participation | (1 << i);
+        end
+      end
+    endtask : generate_participation
+
+    // To avoids deadlock we also have to check if the AW of each involved ??? master is empty or not
+    // Otherwise a deadlock could occure
+    // 1. Reduction request for A+B is generated
+    // 2. Both A & B accept the request but do not send them immidiatly (due to random wait times)
+    // 3. Reduction request for A+C is generated
+    // 4. C accepts the request and sends them immidiatly (due to random wait times)
+    // 5. Deadlock occures as A has the request (A+B) already in the send queues (AW + W) but the semaphore
+    //    would want to wait on the A+C request rather than the A+B request.
+    // Maybe we have to iterate over more than 1 element in the aw_queue - not 100% sure
+    task check_in_aw_queue;
+      input int     i;                  // Index of the investigated master 
+      input addr_t  mst_mask_to_send;   // Reduction mask of the AW request that must be sent
+      output bit    deadlock_found;      // Bit to know if there is a true deadlock condition
+
+      deadlock_found = 1'b0;
+      if(aw_queue[i].size() > 0) begin
+        if (aw_queue[i][0].ax_user[UW-1:OpcodeWidth+OptypeWidth] != mst_mask_to_send) begin
+          // We have found a mask that is not equal to the one we want to send
+          deadlock_found = 1'b1;
+        end
+      end
+    endtask : check_in_aw_queue
+
+    task send_ws(ref logic aw_done);
+      automatic logic       reduction_valid;
+      automatic opcode_t    opcode;
+      automatic addr_t      mst_start_addr;
+      automatic bit         match;
+      automatic addr_t      mask;
+      automatic bit         deadlock_prevention;
+      automatic int         participation_temp;
+
+
+      while (!(aw_done && w_queue[this.mst_idx].size() == 0)) begin
         automatic ax_beat_t aw_beat;
         automatic addr_t addr;
         static logic rand_success;
-        wait (w_queue.size() > 0 || (aw_done && w_queue.size() == 0));
-        aw_beat = w_queue.pop_front();
+        wait (w_queue[this.mst_idx].size() > 0 || (aw_done && w_queue[this.mst_idx].size() == 0));
+        // For exclusive reduction: Hold the element in the queue so other master(s) see on which reduction you work on
+        if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+          aw_beat = w_queue[this.mst_idx][0];
+        end else begin
+          aw_beat = w_queue[this.mst_idx].pop_front();
+        end
         // Extract the opcode from the user mask to determint if we have a offload reduction or not
         opcode = aw_beat.ax_user[OpcodeWidth+OptypeWidth-1:OptypeWidth];
         // Exclusive reduction means all master can only start one reduction!
@@ -1471,19 +1572,47 @@ package axi_reduction_test;
           while(1) begin
             // reset variable and fetch the semaphore which locks the control mechanism
             reduction_valid = 1'b0;
+            deadlock_prevention = 1'b0;
+            mst_start_addr = AddrMap[this.mst_idx].start_addr;
+            // Determint which masters are participating in the reduction
+            generate_participation(mst_start_addr, aw_beat.ax_user[UW-1:OpcodeWidth+OptypeWidth], participation_temp);
+            // Fetch the semaphore
             reduction_sem.get();
+            // First check if any other AW Queue already has a reduction scheduled (with another mask)
+            for(int i = 0; i < NoRedPorts;i++) begin
+                if ((i != this.mst_idx) && ((participation_temp & (1 << i)) != 0)) begin
+                  check_in_aw_queue(i, aw_beat.ax_user[UW-1:OpcodeWidth+OptypeWidth], deadlock_prevention);
+                  if (deadlock_prevention == 1'b1) begin
+                    //$display($time, "     MASTER %1d (W) > deadlock trigger",this.mst_idx);
+                    break;
+                  end
+              end
+            end
             // Check if either no reduction is ongoing or if the master is involved in the reduction
-            if(f_reduction_ongoing == 1'b0) begin
+            if((f_reduction_ongoing == 1'b0) && (deadlock_prevention == 1'b0)) begin
               f_reduction_ongoing = 1'b1;
               reduction_ongoing_mask = aw_beat.ax_user; // Store the mask to determint if a reduction belongs to each other
+              // load the start adr of the master which generated the request
+              mst_start_addr = AddrMap[this.mst_idx].start_addr;
+              participation_reduction_groundtruth = 0;
+              // Go trough every master and check if he is involved in the reduction
+              for (int i = 0; i < NoRedPorts; i++) begin
+                check_in_list(i, mst_start_addr, reduction_ongoing_mask[UW-1:OpcodeWidth+OptypeWidth], match);
+                if(match) begin
+                  participation_reduction_groundtruth = participation_reduction_groundtruth | (1 << i);
+                end
+              end
+              participation_reduction_ongoing = 0;
               reduction_valid = 1'b1;
-              $display($time, " The W channel locked the Semaphor for the mask: %b", reduction_ongoing_mask);
+              $display($time, "     MASTER %1d (W) > lock the semaphore for mask %b with involved master(s) %5b", this.mst_idx, reduction_ongoing_mask, participation_reduction_groundtruth);
             end else if(reduction_ongoing_mask == aw_beat.ax_user) begin
               reduction_valid = 1'b1;
             end
             // Return the semaphore and either break the loop or wait for a certain amount of cycle
             reduction_sem.put();
-            if(reduction_valid == 1'b1) break;
+            if(reduction_valid == 1'b1) begin
+              break;
+            end
             rand_wait(1, 5);
           end
         end
@@ -1507,6 +1636,9 @@ package axi_reduction_test;
           begin_byte = addr % AXI_STRB_WIDTH;
           end_byte = ((begin_byte + n_bytes) >> aw_beat.ax_size) << aw_beat.ax_size;
           strb_mask = '0;
+          if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+            w_beat.w_user = aw_beat.ax_user;
+          end
           for (int unsigned b = begin_byte; b < end_byte; b++)
             strb_mask[b] = 1'b1;
           rand_success = std::randomize(rand_strb); assert (rand_success);
@@ -1515,6 +1647,10 @@ package axi_reduction_test;
           w_beat.w_last = (i == aw_beat.ax_len);
           rand_wait(W_MIN_WAIT_CYCLES, W_MAX_WAIT_CYCLES);
           drv.send_w(w_beat);
+        end
+        // Delete element from queue if the exclusive reduction is enabled
+        if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
+          w_queue[this.mst_idx].pop_front(); // pop the element only after sending the data
         end
       end
     endtask
@@ -1527,9 +1663,13 @@ package axi_reduction_test;
         // Check the return value for a reduction
         if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
           reduction_sem.get();
-          if((f_reduction_ongoing == 1'b1) && (b_beat.b_user == reduction_ongoing_mask)) begin
-            f_reduction_ongoing = 1'b0;
-            $display($time, " The B channel released the Semaphor for the mask: %b", reduction_ongoing_mask);
+          if((f_reduction_ongoing == 1'b1) && ((b_beat.b_user & ~(38'b111111)) == (reduction_ongoing_mask & ~(38'b111111)))) begin
+            participation_reduction_ongoing = participation_reduction_ongoing | (1 << this.mst_idx);
+            $display($time, "     MASTER %1d (B) > current mask: %b - current participation: %5b",this.mst_idx, reduction_ongoing_mask, participation_reduction_ongoing);
+            if(participation_reduction_ongoing == participation_reduction_groundtruth) begin
+              f_reduction_ongoing = 1'b0;
+              $display($time, "     MASTER %1d (B) > release semaphore!",this.mst_idx);
+            end
           end
           reduction_sem.put();
         end
@@ -1610,6 +1750,7 @@ package axi_reduction_test;
 
     // Memory array for when the `MAPPED` parameter is set.
     byte_t memory_q[addr_t];
+    int slv_idx;
 
     function new(
       virtual AXI_BUS_DV #(
@@ -1628,6 +1769,11 @@ package axi_reduction_test;
     function void reset();
       this.drv.reset_slave();
       this.memory_q.delete();
+    endfunction
+
+    //Method to assign the index of the master passed by argument
+    function void set_slv_idx(int slave_index);
+      this.slv_idx = slave_index;
     endfunction
 
     // TODO: The `rand_wait` task exists in `rand_verif_pkg`, but that task cannot be called with
@@ -1762,6 +1908,7 @@ package axi_reduction_test;
         automatic ax_beat_t aw_beat;
         automatic b_beat_t b_beat = new;
         automatic logic rand_success;
+        automatic logic [1:0] commtype;
         wait (b_wait_cnt > 0 && (aw_queue.size() != 0));
         aw_beat = aw_queue.pop_front();
 `ifdef XSIM
@@ -1782,11 +1929,13 @@ package axi_reduction_test;
           b_beat.b_resp = axi_pkg::RESP_OKAY;
         end
         // Adapt response to multicast, otherwise resp would only go to one slv
-        // TODO: Hardcoded position of Opcode (2 Bit) / Optype (4 Bit) with 32 Bit user mask
+        // Hardcoded position of Opcode (2 Bit) / Optype (4 Bit) with 32 Bit user mask
         if(ENABLE_EXCLUSIVE_REDUCTION == 1'b1) begin
-          logic [1:0] commtype = (b_beat.b_user & 38'b00000000000000000000000000000000110000) >> 4;
+          b_beat.b_user = aw_beat.ax_user;  // Copy the User ID (Mask) from the incoming element
+          commtype = (b_beat.b_user & 38'b00000000000000000000000000000000110000) >> 4;
           if(commtype == 2'b11) begin
             b_beat.b_user = (b_beat.b_user & 38'b11111111111111111111111111111111000000) | 38'b00000000000000000000000000000000010000;
+            $display($time, "     SLAVE > ID %d Commtype reduction! User Mask: %b", this.slv_idx, b_beat.b_user);
           end
         end
         drv.send_b(b_beat);
