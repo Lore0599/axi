@@ -712,6 +712,7 @@ package axi_reduction_test;
     // Extra parameters to handle reduction requests
     parameter type   rule_t,
     parameter int    NoAddrRules      = 32'd2,
+    parameter int    NoInvalidPath    = 32'd1,
     parameter int    NoMsts           = 32'd2,
     parameter int    NoSlvs           = 32'd2,
     parameter int    NoRedPorts       = 32'd0,
@@ -720,6 +721,7 @@ package axi_reduction_test;
     parameter bit    ENABLE_EXCLUSIVE_REDUCTION = 1'b0,
     parameter int    ReductionId,
     parameter rule_t [NoAddrRules-1:0] AddrMap,
+    parameter rule_t [NoInvalidPath-1:0] InvalidPath,
 
     // Dependent parameters, do not override.
     parameter int   AXI_STRB_WIDTH = DW/8,
@@ -900,102 +902,118 @@ package axi_reduction_test;
       automatic addr_t    slv_dst_addr;
       automatic opcode_t  OPCODE;
       automatic optype_t  OPTYPE; 
+      automatic bit       violation_invalid_path;
       //----------------------------------------------------------------------------------
 
-      // No memory regions defined
-      if (mem_map.size() == 0) begin
-        // Return a dummy region
-        mem_region = '{
-          addr_begin: '0,
-          addr_end:   '1,
-          mem_type:   axi_pkg::NORMAL_NONCACHEABLE_BUFFERABLE
-        };
-      end else begin
-        // Randomly pick a memory region
-        rand_success = std::randomize(mem_region_idx) with {
-          mem_region_idx < mem_map.size();
-        }; assert(rand_success);
-        mem_region = mem_map[mem_region_idx];
-      end
+      forever begin
+        // No memory regions defined
+        if (mem_map.size() == 0) begin
+          // Return a dummy region
+          mem_region = '{
+            addr_begin: '0,
+            addr_end:   '1,
+            mem_type:   axi_pkg::NORMAL_NONCACHEABLE_BUFFERABLE
+          };
+        end else begin
+          // Randomly pick a memory region
+          rand_success = std::randomize(mem_region_idx) with {
+            mem_region_idx < mem_map.size();
+          }; assert(rand_success);
+          mem_region = mem_map[mem_region_idx];
+        end
 
-      // Randomly pick burst type.
-      rand_success = std::randomize(burst) with {
-        burst inside {this.allowed_bursts};
-      }; assert(rand_success);
-      ax_beat.ax_burst = burst;
-      // Determine memory type.
-      ax_beat.ax_cache = is_read ? axi_pkg::get_arcache(mem_region.mem_type) : axi_pkg::get_awcache(mem_region.mem_type);
-      // Randomize beat size.
-      if (TRAFFIC_SHAPING) begin
-        rand_success = std::randomize(cprob) with {
-          cprob >= 0; cprob < max_cprob;
+        // Randomly pick burst type.
+        rand_success = std::randomize(burst) with {
+          burst inside {this.allowed_bursts};
         }; assert(rand_success);
+        ax_beat.ax_burst = burst;
+        // Determine memory type.
+        ax_beat.ax_cache = is_read ? axi_pkg::get_arcache(mem_region.mem_type) : axi_pkg::get_awcache(mem_region.mem_type);
+        // Randomize beat size.
+        if (TRAFFIC_SHAPING) begin
+          rand_success = std::randomize(cprob) with {
+            cprob >= 0; cprob < max_cprob;
+          }; assert(rand_success);
 
-        for (int i = 0; i < traffic_shape.size(); i++)
-          if (traffic_shape[i].cprob > cprob) begin
-            len = traffic_shape[i].len;
-            if (ax_beat.ax_burst == BURST_WRAP) begin
-              assert (len inside {len_t'(1), len_t'(3), len_t'(7), len_t'(15)});
+          for (int i = 0; i < traffic_shape.size(); i++)
+            if (traffic_shape[i].cprob > cprob) begin
+              len = traffic_shape[i].len;
+              if (ax_beat.ax_burst == BURST_WRAP) begin
+                assert (len inside {len_t'(1), len_t'(3), len_t'(7), len_t'(15)});
+              end
+              break;
             end
-            break;
+
+          // Randomize address.  Make sure that the burst does not cross a 4KiB boundary.
+          forever begin
+            rand_success = std::randomize(size) with {
+              2**size <= AXI_STRB_WIDTH;
+              2**size <= len;
+            }; assert(rand_success);
+            ax_beat.ax_size = size;
+            ax_beat.ax_len = ((len + (1 << size) - 1) >> size) - 1;
+
+            rand_success = std::randomize(addr) with {
+              addr >= mem_region.addr_begin;
+              addr <= mem_region.addr_end;
+              addr + len <= mem_region.addr_end;
+            }; assert(rand_success);
+
+            if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
+              if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (addr & PFN_MASK)) begin
+                break;
+              end
+            end else begin // BURST_INCR
+              if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len + 1)) & PFN_MASK) == (addr & PFN_MASK)) begin
+                break;
+              end
+            end
           end
+        end else begin
+          // Randomize address.  Make sure that the burst does not cross a 4KiB boundary.
+          forever begin
+            // Randomize burst length.
+            rand_success = std::randomize(len) with {
+              len <= this.max_len;
+              (ax_beat.ax_burst == BURST_WRAP) ->
+                  len inside {len_t'(1), len_t'(3), len_t'(7), len_t'(15)};
+            }; assert(rand_success);
+            rand_success = std::randomize(size) with {
+              2**size <= AXI_STRB_WIDTH;
+            }; assert(rand_success);
+            ax_beat.ax_size = size;
+            ax_beat.ax_len = len;
 
-        // Randomize address.  Make sure that the burst does not cross a 4KiB boundary.
-        forever begin
-          rand_success = std::randomize(size) with {
-            2**size <= AXI_STRB_WIDTH;
-            2**size <= len;
-          }; assert(rand_success);
-          ax_beat.ax_size = size;
-          ax_beat.ax_len = ((len + (1 << size) - 1) >> size) - 1;
+            // Randomize address
+            rand_success = std::randomize(addr) with {
+              addr >= mem_region.addr_begin;
+              addr <= mem_region.addr_end;
+              addr + ((len + 1) << size) <= mem_region.addr_end;
+            }; assert(rand_success);
 
-          rand_success = std::randomize(addr) with {
-            addr >= mem_region.addr_begin;
-            addr <= mem_region.addr_end;
-            addr + len <= mem_region.addr_end;
-          }; assert(rand_success);
-
-          if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
-            if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (addr & PFN_MASK)) begin
-              break;
+            // If Enable exclusive reduction then we hve to check that we do not schedule an reduction on an invalid path
+            if(ENABLE_EXCLUSIVE_REDUCTION) begin
+              check_invalid_path(AddrMap[this.mst_idx].start_addr, addr, "Address Generation",violation_invalid_path);
+              //if(violation_invalid_path == 1'b1) begin
+              //  break;
+              //end
             end
-          end else begin // BURST_INCR
-            if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len + 1)) & PFN_MASK) == (addr & PFN_MASK)) begin
-              break;
+
+            if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
+              if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (addr & PFN_MASK)) begin
+                break;
+              end
+            end else begin // BURST_INCR, BURST_WRAP
+              if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len + 1)) & PFN_MASK) == (addr & PFN_MASK)) begin
+                break;
+              end
             end
           end
         end
-      end else begin
-        // Randomize address.  Make sure that the burst does not cross a 4KiB boundary.
-        forever begin
-          // Randomize burst length.
-          rand_success = std::randomize(len) with {
-            len <= this.max_len;
-            (ax_beat.ax_burst == BURST_WRAP) ->
-                len inside {len_t'(1), len_t'(3), len_t'(7), len_t'(15)};
-          }; assert(rand_success);
-          rand_success = std::randomize(size) with {
-            2**size <= AXI_STRB_WIDTH;
-          }; assert(rand_success);
-          ax_beat.ax_size = size;
-          ax_beat.ax_len = len;
 
-          // Randomize address
-          rand_success = std::randomize(addr) with {
-            addr >= mem_region.addr_begin;
-            addr <= mem_region.addr_end;
-            addr + ((len + 1) << size) <= mem_region.addr_end;
-          }; assert(rand_success);
-
-          if (ax_beat.ax_burst == axi_pkg::BURST_FIXED) begin
-            if (((addr + 2**ax_beat.ax_size) & PFN_MASK) == (addr & PFN_MASK)) begin
-              break;
-            end
-          end else begin // BURST_INCR, BURST_WRAP
-            if (((addr + 2**ax_beat.ax_size * (ax_beat.ax_len + 1)) & PFN_MASK) == (addr & PFN_MASK)) begin
-              break;
-            end
-          end
+        // Check if we had not a invalid path
+        if(violation_invalid_path == 1'b0) begin
+          break;
         end
       end
 
@@ -1267,7 +1285,8 @@ package axi_reduction_test;
       automatic int         writes_left;        // How many write transactions are left 
       automatic int         cnt_waiting_reductions_tmp[NoRedPorts-1:0]  = '{default:'0};
       automatic int         cnt_involved_slaves;
-      automatic string involved_masters;
+      automatic string      involved_masters;        // String to determint all involved Masters
+      automatic bit         violation_path;
 
       mst_start_addr = AddrMap[this.mst_idx].start_addr;
 
@@ -1294,6 +1313,14 @@ package axi_reduction_test;
               end else if ((writes_left <= cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
                   valid_mask = 1'b0;
                   break;
+              end
+              // Check if we have invalid path or not
+              if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx)) begin
+                check_invalid_path(AddrMap[i].start_addr, slv_dst_address, "Mask Generation",violation_path);
+                if(violation_path == 1'b1) begin
+                  valid_mask = 1'b0;
+                  break;
+                end
               end
           end
 
@@ -1339,7 +1366,7 @@ package axi_reduction_test;
             involved_masters = {involved_masters, $sformatf("%1d, ", i)};
           end
       end
-      $display($time, "     MASTER GEN > ID %1d with mask: %b and masters [%s]", this.mst_idx, reduction_mask, involved_masters.substr(0, involved_masters.len()-2));
+      $display($time, "     MASTER GEN > ID %1d with mask: %b and masters [%s] to Slave [%1d]", this.mst_idx, reduction_mask, involved_masters.substr(0, involved_masters.len()-2), slv_dst_idx);
     endtask : generate_reduction
 
     //
@@ -1361,7 +1388,42 @@ package axi_reduction_test;
       
     endtask : check_in_list
 
-    
+    //
+    // Task to check if the generated address does not violate an invalid path (Only @ exclusive reduction)
+    //
+    task check_invalid_path;
+      input addr_t  src_addr;
+      input addr_t  dst_addr;
+      input string  s;
+      output bit    violation;
+
+      addr_t src_addr_start;
+      addr_t dst_addr_start;
+
+      // Set the defult value
+      violation = 1'b0;
+
+      // Get the start address for bot src and dst!
+      for(int i = 0; i < NoAddrRules; i++) begin
+        if((src_addr >= AddrMap[i].start_addr) && (src_addr < AddrMap[i].end_addr)) begin
+          src_addr_start = AddrMap[i].start_addr;
+        end
+        if((dst_addr >= AddrMap[i].start_addr) && (dst_addr < AddrMap[i].end_addr)) begin
+          dst_addr_start = AddrMap[i].start_addr;
+        end
+      end
+
+      //$display($time, " Validate %s between src %h (%h) and dst %h (%h)",s, src_addr_start, src_addr, dst_addr_start, dst_addr);
+
+      // Iterate over the InvalidPath Array and see if we find a invalid path
+      for(int i = 0; i < NoInvalidPath; i++) begin
+        if((InvalidPath[i].start_addr == src_addr_start) && (InvalidPath[i].end_addr == dst_addr_start)) begin
+          violation = 1'b1;
+        end
+      end
+
+    endtask : check_invalid_path
+
     //------------------------------------------------------------------------------------------------------------------
     //------------------------------------------------------------------------------------------------------------------
     
@@ -1934,7 +1996,8 @@ package axi_reduction_test;
           b_beat.b_user = aw_beat.ax_user;  // Copy the User ID (Mask) from the incoming element
           commtype = (b_beat.b_user & 38'b00000000000000000000000000000000110000) >> 4;
           if(commtype == 2'b11) begin
-            b_beat.b_user = (b_beat.b_user & 38'b11111111111111111111111111111111000000) | 38'b00000000000000000000000000000000010000;
+            //b_beat.b_user = (b_beat.b_user & 38'b11111111111111111111111111111111000000) | 38'b00000000000000000000000000000000010000;
+            b_beat.b_user = (b_beat.b_user & 38'b11111111111111111111111111111111000000);
             $display($time, "     SLAVE > ID %d Commtype reduction! User Mask: %b", this.slv_idx, b_beat.b_user);
           end
         end
