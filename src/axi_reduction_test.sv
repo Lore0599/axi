@@ -713,6 +713,7 @@ package axi_reduction_test;
     parameter type   rule_t,
     parameter int    NoAddrRules      = 32'd2,
     parameter int    NoInvalidPath    = 32'd1,
+    parameter int    NoPossibleMask   = 32'd1,
     parameter int    NoMsts           = 32'd2,
     parameter int    NoSlvs           = 32'd2,
     parameter int    NoRedPorts       = 32'd0,
@@ -722,6 +723,8 @@ package axi_reduction_test;
     parameter int    ReductionId,
     parameter rule_t [NoAddrRules-1:0] AddrMap,
     parameter rule_t [NoInvalidPath-1:0] InvalidPath,
+    parameter rule_t [NoPossibleMask-1:0] PossibleMask,
+
 
     // Dependent parameters, do not override.
     parameter int   AXI_STRB_WIDTH = DW/8,
@@ -905,6 +908,7 @@ package axi_reduction_test;
       automatic bit       violation_invalid_path;
       //----------------------------------------------------------------------------------
 
+      violation_invalid_path = 1'b0;
       forever begin
         // No memory regions defined
         if (mem_map.size() == 0) begin
@@ -993,7 +997,19 @@ package axi_reduction_test;
 
             // If Enable exclusive reduction then we hve to check that we do not schedule an reduction on an invalid path
             if(ENABLE_EXCLUSIVE_REDUCTION) begin
-              check_invalid_path(AddrMap[this.mst_idx].start_addr, addr, "Address Generation",violation_invalid_path);
+
+
+              int unsigned addr_idx;
+              rand_success = std::randomize(addr_idx) with {
+                addr_idx >= 0;
+                addr_idx < NoPossibleMask;
+              };
+              assert(rand_success);
+
+
+              //addr = 32'h00110000;
+              addr = PossibleMask[addr_idx].start_addr;
+              //check_invalid_path(AddrMap[this.mst_idx].start_addr, addr, "Address Generation",violation_invalid_path);
               //if(violation_invalid_path == 1'b1) begin
               //  break;
               //end
@@ -1230,7 +1246,7 @@ package axi_reduction_test;
         if (id_is_legal(is_read, beat)) begin
           break;
         end else begin
-          // The current ID is currently not legal, so try another ID in the next cycle and
+          // The current ID is currently not legal, so try another ID in the next cycle and 
           // release the semaphore until then.
           cnt_sem.put();
           rand_wait(1, 1);
@@ -1287,58 +1303,85 @@ package axi_reduction_test;
       automatic int         cnt_involved_slaves;
       automatic string      involved_masters;        // String to determint all involved Masters
       automatic bit         violation_path;
+      automatic int         rand_mask_selection;
+      automatic int         deadlock_avoidance;
 
       mst_start_addr = AddrMap[this.mst_idx].start_addr;
 
       // The generation continues until a valid mask is generated
-      forever begin
-          rand_success = std::randomize (reduction_mask);
-          assert(rand_success);
-          // Count how many masters are involved in the reduction list
-          // and check if they have enough write transactions left.
-          valid_mask = 1;
-          cnt_involved_slaves = 0;
-          cnt_waiting_reductions_tmp  = '{default:'0};
-          for (int i = 0; i < NoRedPorts; i++) begin
-              check_in_list(i, mst_start_addr, reduction_mask, match);
-              writes_left     = NoWrites - cnt_generated_AW[i];
-              // Abort the generation of the reduction if any involved master already has a scheduled reduction (deadlock potential)
-              if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx) && (create_reductions_queue[i].size() != 0)) begin
-                valid_mask = 1'b0;
-                break;
-              end
-              if ((writes_left > cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
-                      cnt_waiting_reductions_tmp[i]++;
-                      cnt_involved_slaves++;
-              end else if ((writes_left <= cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
+      if(!ENABLE_EXCLUSIVE_REDUCTION) begin
+        forever begin
+            rand_success = std::randomize (reduction_mask);
+            assert(rand_success);
+            // Count how many masters are involved in the reduction list
+            // and check if they have enough write transactions left.
+            valid_mask = 1;
+            cnt_involved_slaves = 0;
+            cnt_waiting_reductions_tmp  = '{default:'0};
+            for (int i = 0; i < NoRedPorts; i++) begin
+                check_in_list(i, mst_start_addr, reduction_mask, match);
+                writes_left     = NoWrites - cnt_generated_AW[i];
+                // Abort the generation of the reduction if any involved master already has a scheduled reduction (deadlock potential)
+                if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx) && (create_reductions_queue[i].size() != 0)) begin
                   valid_mask = 1'b0;
                   break;
-              end
-              // Check if we have invalid path or not
-              if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx)) begin
-                check_invalid_path(AddrMap[i].start_addr, slv_dst_address, "Mask Generation",violation_path);
-                if(violation_path == 1'b1) begin
+                end
+                // Check if we have invalid path or not
+                if((ENABLE_EXCLUSIVE_REDUCTION == 1'b1) && match && (i != mst_idx)) begin
+                  check_invalid_path(AddrMap[i].start_addr, slv_dst_address, "Mask Generation",violation_path);
+                  if(violation_path == 1'b1) begin
+                    valid_mask = 1'b0;
+                    break;
+                  end
+                end
+                if ((writes_left > cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
+                        cnt_waiting_reductions_tmp[i]++;
+                        cnt_involved_slaves++;
+                end else if ((writes_left <= cnt_mst_waiting_reductions[i]) && match && (i != mst_idx)) begin
+                    valid_mask = 1'b0;
+                    break;
+                end
+            end
+
+            // make sure that none of the other masters match the reduction mask
+            // since these ports cannot carry any reduction requets, it's not possible 
+            // to generate a reduction request which includes them.
+            if (valid_mask) begin
+              for (int i = NoRedPorts; i < NoMsts; i++) begin
+                check_in_list(i, mst_start_addr, reduction_mask, match);
+                if (match) begin
                   valid_mask = 1'b0;
                   break;
                 end
               end
-          end
-
-          // make sure that none of the other masters match the reduction mask
-          // since these ports cannot carry any reduction requets, it's not possible 
-          // to generate a reduction request which includes them.
-          if (valid_mask) begin
-            for (int i = NoRedPorts; i < NoMsts; i++) begin
-              check_in_list(i, mst_start_addr, reduction_mask, match);
-              if (match) begin
-                valid_mask = 1'b0;
-                break;
-              end
             end
+            if (valid_mask) begin
+                break;
+            end
+        end
+      end else begin
+        // Iterate through the possible mask until we find one that maches with the selected slave addr
+        int unsigned addr_idx;
+        forever begin
+          rand_success = std::randomize(addr_idx) with {
+            addr_idx >= 0;
+            addr_idx < NoPossibleMask;
+          };
+          assert(rand_success);
+
+          if(PossibleMask[addr_idx].start_addr == slv_dst_address) begin
+            break;
           end
-          if (valid_mask) begin
-              break;
-          end
+        end
+        // Randomize the lower bits of the mask
+        rand_success = std::randomize (reduction_mask);
+        assert(rand_success);
+        reduction_mask = reduction_mask & 32'h0000FFFF;
+        reduction_mask = reduction_mask | PossibleMask[addr_idx].end_addr;
+        // Increment the counter for all port the same
+        for(int i = 0; i < NoRedPorts;i++) begin
+          cnt_waiting_reductions_tmp[i]++;
+        end
       end
 
       // TODO: random generation of the OPCODE
